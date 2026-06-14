@@ -1,0 +1,329 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Starlink 星链轨道部署 · 3D 可视化</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#000;overflow:hidden;color:#e2e8f0}
+canvas{display:block}
+#loading{position:fixed;top:0;left:0;width:100%;height:100%;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:999;transition:opacity .8s}
+#loading.hide{opacity:0;pointer-events:none}
+.spinner{width:50px;height:50px;border:3px solid #1e293b;border-top-color:#38bdf8;border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loading p{margin-top:16px;color:#94a3b8;font-size:14px}
+#stats{position:fixed;top:16px;left:16px;background:rgba(15,23,42,.85);border:1px solid rgba(56,189,248,.3);border-radius:12px;padding:16px;font-size:13px;line-height:1.8;z-index:10;backdrop-filter:blur(8px);min-width:200px}
+#stats h3{color:#38bdf8;margin-bottom:8px;font-size:14px}
+#stats .row{display:flex;justify-content:space-between;gap:12px}
+#stats .label{color:#94a3b8}
+#stats .val{color:#e2e8f0;font-weight:600}
+#controls{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:10;flex-wrap:wrap;justify-content:center}
+#controls button{background:rgba(15,23,42,.85);border:1px solid rgba(56,189,248,.3);color:#e2e8f0;padding:8px 14px;border-radius:8px;font-size:12px;cursor:pointer;transition:all .2s;backdrop-filter:blur(8px)}
+#controls button:hover{background:rgba(56,189,248,.2);border-color:#38bdf8}
+#controls button.active{background:rgba(56,189,248,.3);border-color:#38bdf8;color:#fff}
+#tip{position:fixed;pointer-events:none;background:rgba(15,23,42,.92);border:1px solid rgba(56,189,248,.4);border-radius:8px;padding:8px 12px;font-size:12px;z-index:20;opacity:0;transition:opacity .15s;backdrop-filter:blur(8px)}
+#tip .name{color:#38bdf8;font-weight:700;margin-bottom:2px}
+#tip .info{color:#94a3b8}
+#title{position:fixed;top:16px;right:16px;text-align:right;z-index:10}
+#title h1{font-size:18px;font-weight:700;color:#fff;text-shadow:0 0 20px rgba(56,189,248,.5)}
+#title p{font-size:12px;color:#64748b;margin-top:4px}
+@media(max-width:640px){
+#stats{top:auto;bottom:80px;left:8px;right:8px;padding:12px;min-width:auto;font-size:12px}
+#title{top:8px;right:8px}
+#title h1{font-size:15px}
+#controls{bottom:12px}
+#controls button{padding:6px 10px;font-size:11px}
+}
+</style>
+</head>
+<body>
+<div id="loading"><div class="spinner"></div><p>正在加载星链数据...</p></div>
+<div id="stats">
+<h3>🛰️ 星链部署数据</h3>
+<div class="row"><span class="label">卫星总数</span><span class="val" id="satCount">—</span></div>
+<div class="row"><span class="label">轨道壳层</span><span class="val" id="shellCount">—</span></div>
+<div class="row"><span class="label">高度范围</span><span class="val" id="altRange">—</span></div>
+<div class="row"><span class="label">覆盖率</span><span class="val" id="coverage">—</span></div>
+</div>
+<div id="title"><h1>Starlink 星链轨道</h1><p>3D 实时部署可视化</p></div>
+<div id="controls">
+<button id="btnRot" class="active">🔄 自转</button>
+<button id="btnGlow" class="active">✨ 大气</button>
+<button id="btnOrbit">⭕ 轨道线</button>
+<button id="btnTrails">☄️ 拖尾</button>
+<button id="btnReset">🎯 复位</button>
+</div>
+<div id="tip"><div class="name"></div><div class="info"></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
+<script>
+const PI=Math.PI,sin=Math.sin,cos=Math.cos,acos=Math.acos,sqrt=Math.sqrt,abs=Math.abs,min=Math.min,max=Math.max,pow=Math.pow;
+const R_EARTH=1,DEG=PI/180;
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.01,200);
+camera.position.set(0,1.8,3.2);
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(min(devicePixelRatio,2));
+document.body.appendChild(renderer.domElement);
+
+// Lights
+scene.add(new THREE.AmbientLight(0x334466,0.6));
+const sun=new THREE.DirectionalLight(0xffeedd,1.8);
+sun.position.set(5,2,3);
+scene.add(sun);
+
+// Stars
+const starGeo=new THREE.BufferGeometry();
+const starVerts=[];
+for(let i=0;i<6000;i++){const r=80+Math.random()*40;const th=Math.random()*PI*2;const ph=acos(2*Math.random()-1);starVerts.push(r*sin(ph)*cos(th),r*sin(ph)*sin(th),r*cos(ph));}
+starGeo.setAttribute('position',new THREE.Float32BufferAttribute(starVerts,3));
+scene.add(new THREE.Points(starGeo,new THREE.PointsMaterial({color:0xffffff,size:0.08,sizeAttenuation:true})));
+
+// Procedural Earth texture (no external images needed)
+function createEarthTexture(){
+ const c=document.createElement('canvas');c.width=2048;c.height=1024;
+ const ctx=c.getContext('2d');
+ // Ocean gradient
+ const g=ctx.createLinearGradient(0,0,0,1024);
+ g.addColorStop(0,'#0a1628');g.addColorStop(.3,'#0f2847');g.addColorStop(.5,'#163a5f');
+ g.addColorStop(.7,'#0f2847');g.addColorStop(1,'#0a1628');
+ ctx.fillStyle=g;ctx.fillRect(0,0,2048,1024);
+ // Continents (simplified)
+ ctx.fillStyle='#1a5c3a';
+ // North America
+ ctx.beginPath();ctx.moveTo(200,200);ctx.lineTo(350,180);ctx.lineTo(400,250);ctx.lineTo(380,350);ctx.lineTo(300,400);ctx.lineTo(250,350);ctx.lineTo(200,280);ctx.fill();
+ // South America
+ ctx.beginPath();ctx.moveTo(350,450);ctx.lineTo(400,420);ctx.lineTo(420,500);ctx.lineTo(400,600);ctx.lineTo(350,650);ctx.lineTo(320,580);ctx.lineTo(330,500);ctx.fill();
+ // Europe
+ ctx.beginPath();ctx.moveTo(900,200);ctx.lineTo(1050,180);ctx.lineTo(1100,250);ctx.lineTo(1050,300);ctx.lineTo(950,320);ctx.lineTo(900,280);ctx.fill();
+ // Africa
+ ctx.beginPath();ctx.moveTo(950,350);ctx.lineTo(1100,320);ctx.lineTo(1150,400);ctx.lineTo(1120,550);ctx.lineTo(1050,620);ctx.lineTo(980,580);ctx.lineTo(950,450);ctx.fill();
+ // Asia
+ ctx.beginPath();ctx.moveTo(1100,150);ctx.lineTo(1500,120);ctx.lineTo(1700,180);ctx.lineTo(1750,280);ctx.lineTo(1650,350);ctx.lineTo(1400,380);ctx.lineTo(1200,350);ctx.lineTo(1100,250);ctx.fill();
+ // Australia
+ ctx.beginPath();ctx.moveTo(1550,500);ctx.lineTo(1700,480);ctx.lineTo(1750,540);ctx.lineTo(1700,600);ctx.lineTo(1580,580);ctx.fill();
+ // Ice caps
+ ctx.fillStyle='#c8d8e8';
+ ctx.fillRect(0,0,2048,40);ctx.fillRect(0,984,2048,40);
+ // Grid lines
+ ctx.strokeStyle='rgba(56,189,248,0.08)';ctx.lineWidth=0.5;
+ for(let i=0;i<36;i++){const x=i*2048/36;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,1024);ctx.stroke();}
+ for(let i=0;i<18;i++){const y=i*1024/18;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(2048,y);ctx.stroke();}
+ return new THREE.CanvasTexture(c);
+}
+
+const earthTex=createEarthTexture();
+const earthMat=new THREE.MeshPhongMaterial({map:earthTex,shininess:25});
+const earth=new THREE.Mesh(new THREE.SphereGeometry(R_EARTH,128,64),earthMat);
+scene.add(earth);
+
+// Clouds (procedural)
+function createCloudTexture(){
+ const c=document.createElement('canvas');c.width=1024;c.height=512;
+ const ctx=c.getContext('2d');
+ ctx.fillStyle='rgba(0,0,0,0)';
+ ctx.fillRect(0,0,1024,512);
+ ctx.fillStyle='rgba(255,255,255,0.4)';
+ for(let i=0;i<200;i++){
+  const x=Math.random()*1024,y=Math.random()*512;
+  const rx=20+Math.random()*60,ry=5+Math.random()*15;
+  ctx.beginPath();ctx.ellipse(x,y,rx,ry,Math.random()*PI,0,PI*2);ctx.fill();
+ }
+ return new THREE.CanvasTexture(c);
+}
+const cloudTex=createCloudTexture();
+const cloudMat=new THREE.MeshPhongMaterial({map:cloudTex,transparent:true,opacity:0.3,depthWrite:false});
+const clouds=new THREE.Mesh(new THREE.SphereGeometry(R_EARTH*1.008,64,32),cloudMat);
+scene.add(clouds);
+
+// Atmosphere glow
+const atmosGeo=new THREE.SphereGeometry(R_EARTH*1.04,64,32);
+const atmosMat=new THREE.ShaderMaterial({
+ vertexShader:`varying vec3 vNormal;void main(){vNormal=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+ fragmentShader:`varying vec3 vNormal;void main(){float intensity=pow(.65-dot(vNormal,vec3(0,0,1.)),2.5);gl_FragColor=vec4(.3,.6,1.,1.)*intensity;}`,
+ blending:THREE.AdditiveBlending,side:THREE.BackSide,transparent:true,depthWrite:false
+});
+const atmos=new THREE.Mesh(atmosGeo,atmosMat);
+scene.add(atmos);
+
+// Starlink shells data
+const shells=[
+ {name:'Shell 1',alt:550,inc:53,sats:1584,planes:72,satsPerPlane:22,color:0x38bdf8,gen:1,operational:true},
+ {name:'Shell 2',alt:540,inc:53.2,sats:1584,planes:72,satsPerPlane:22,color:0x818cf8,gen:1,operational:true},
+ {name:'Shell 3',alt:570,inc:70,sats:720,planes:36,satsPerPlane:20,color:0x06b6d4,gen:1,operational:true},
+ {name:'Shell 4',alt:560,inc:97.6,sats:384,planes:6,satsPerPlane:64,color:0xf472b6,gen:1,polar:true,operational:true},
+ {name:'Shell 5',alt:525,inc:53,sats:2547,planes:72,satsPerPlane:36,color:0xa78bfa,gen:2,operational:true},
+ {name:'Gen2 LEO',alt:340,inc:53,sats:7500,planes:120,satsPerPlane:62,color:0xfbbf24,gen:2,planned:true},
+];
+const totalSats=shells.reduce((a,s)=>a+s.sats,0);
+document.getElementById('satCount').textContent=totalSats.toLocaleString();
+document.getElementById('shellCount').textContent=shells.length;
+document.getElementById('altRange').textContent=Math.min(...shells.map(s=>s.alt))+'–'+Math.max(...shells.map(s=>s.alt))+'km';
+document.getElementById('coverage').textContent='~'+Math.round(totalSats/42000*100)+'%';
+
+// Orbit lines
+const orbitGroup=new THREE.Group();
+scene.add(orbitGroup);
+function makeOrbitRing(r,inc,color,opacity=0.08){
+ const pts=[];for(let i=0;i<=360;i++){const a=i*DEG;pts.push(new THREE.Vector3(r*cos(a),r*sin(a)*cos(inc*DEG),r*sin(a)*sin(inc*DEG)));}
+ const geo=new THREE.BufferGeometry().setFromPoints(pts);
+ const mat=new THREE.LineBasicMaterial({color,transparent:true,opacity,depthWrite:false});
+ return new THREE.Line(geo,mat);
+}
+shells.forEach(sh=>{
+ const r=R_EARTH+sh.alt/6371;
+ const count=sh.polar?3:min(sh.planes,18);
+ for(let i=0;i<count;i++){
+  const ring=makeOrbitRing(r,sh.inc,sh.color,sh.planned?0.03:0.06);
+  ring.rotation.y=i*PI/count;
+  orbitGroup.add(ring);
+ }
+});
+orbitGroup.visible=false;
+
+// Satellite particles
+const satGroup=new THREE.Group();
+scene.add(satGroup);
+const satGeoInst=new THREE.SphereGeometry(0.006,6,4);
+const satMaterials=shells.map(sh=>new THREE.MeshBasicMaterial({color:sh.color}));
+const allSats=[];
+shells.forEach((sh,si)=>{
+ const r=R_EARTH+sh.alt/6371;
+ const count=sh.planned?min(sh.sats,300):sh.sats;
+ for(let p=0;p<sh.planes;p++){
+  const planeAngle=p*2*PI/sh.planes;
+  const satsInPlane=sh.planned?min(sh.satsPerPlane,4):sh.satsPerPlane;
+  for(let s=0;s<satsInPlane;s++){
+   const satAngle=s*2*PI/satsInPlane+(p%2)*PI/satsInPlane;
+   const mesh=new THREE.Mesh(satGeoInst,satMaterials[si]);
+   const data={mesh,r,inc:sh.inc*DEG,planeAngle,satAngle,speed:0.02+Math.random()*0.005,shell:sh,idx:allSats.length};
+   allSats.push(data);
+   satGroup.add(mesh);
+  }
+ }
+});
+function updateSats(t){
+ allSats.forEach(s=>{
+  const a=s.satAngle+t*s.speed;
+  const pa=s.planeAngle+t*s.speed*0.01;
+  const x=s.r*cos(a);
+  const y=s.r*sin(a)*cos(pa)*cos(s.inc)-s.r*sin(a)*sin(pa)*sin(s.inc);
+  const z=s.r*sin(a)*cos(pa)*sin(s.inc)+s.r*sin(a)*sin(pa)*cos(s.inc);
+  s.mesh.position.set(x,y,z);
+  s.mesh.scale.setScalar(s.shell.planned?0.5:1);
+ });
+}
+
+// Trails
+const trailGroup=new THREE.Group();
+scene.add(trailGroup);
+const trailSats=allSats.filter((_,i)=>i%20===0);
+const trailLines=[];
+trailSats.forEach(s=>{
+ const pts=new Array(40).fill(null).map(()=>new THREE.Vector3());
+ const geo=new THREE.BufferGeometry().setFromPoints(pts);
+ const mat=new THREE.LineBasicMaterial({color:s.shell.color,transparent:true,opacity:0.25,depthWrite:false});
+ const line=new THREE.Line(geo,mat);
+ trailGroup.add(line);
+ trailLines.push({line,pts,data:s});
+});
+trailGroup.visible=false;
+function updateTrails(t){
+ trailLines.forEach(({line,pts,data:s})=>{
+  for(let i=0;i<40;i++){
+   const a=s.satAngle+t*s.speed-i*0.03;
+   const pa=s.planeAngle+t*s.speed*0.01-i*0.001;
+   const x=s.r*cos(a);
+   const y=s.r*sin(a)*cos(pa)*cos(s.inc)-s.r*sin(a)*sin(pa)*sin(s.inc);
+   const z=s.r*sin(a)*cos(pa)*sin(s.inc)+s.r*sin(a)*sin(pa)*cos(s.inc);
+   pts[i].set(x,y,z);
+  }
+  line.geometry.setFromPoints(pts);
+ });
+}
+
+// Mouse interaction
+const raycaster=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+const tip=document.getElementById('tip');
+function onMouseMove(e){
+ mouse.x=(e.clientX/innerWidth)*2-1;
+ mouse.y=-(e.clientY/innerHeight)*2+1;
+ raycaster.setFromCamera(mouse,camera);
+ const hits=raycaster.intersectObjects(satGroup.children);
+ if(hits.length>0){
+  const hit=hits[0].object;
+  const data=allSats.find(s=>s.mesh===hit);
+  if(data){
+   tip.querySelector('.name').textContent=data.shell.name;
+   tip.querySelector('.info').textContent='高度 '+data.shell.alt+'km · 倾角 '+data.shell.inc+'° · Gen'+data.shell.gen;
+   tip.style.left=e.clientX+12+'px';tip.style.top=e.clientY-40+'px';
+   tip.classList.add('show');document.body.style.cursor='pointer';return;
+  }
+ }
+ tip.classList.remove('show');document.body.style.cursor='grab';
+}
+addEventListener('mousemove',onMouseMove);
+
+// Camera controls
+let isDown=false,px=0,py=0,theta=0.3,phi=1.2,dist=3.2;
+let autoRotate=true;
+document.body.style.cursor='grab';
+addEventListener('mousedown',e=>{isDown=true;px=e.clientX;py=e.clientY;document.body.style.cursor='grabbing';});
+addEventListener('mouseup',()=>{isDown=false;document.body.style.cursor='grab';});
+addEventListener('mousemove',e=>{
+ if(!isDown)return;
+ const dx=(e.clientX-px)*0.005;const dy=(e.clientY-py)*0.005;
+ theta-=dx;phi=max(0.1,min(PI-0.1,phi-dy));
+ px=e.clientX;py=e.clientY;
+});
+addEventListener('wheel',e=>{dist=max(1.5,min(8,dist+e.deltaY*0.002));},{passive:true});
+addEventListener('touchstart',e=>{isDown=true;px=e.touches[0].clientX;py=e.touches[0].clientY;},{passive:true});
+addEventListener('touchmove',e=>{
+ if(!isDown||e.touches.length!==1)return;
+ const dx=(e.touches[0].clientX-px)*0.005;const dy=(e.touches[0].clientY-py)*0.005;
+ theta-=dx;phi=max(0.1,min(PI-0.1,phi-dy));
+ px=e.touches[0].clientX;py=e.touches[0].clientY;
+},{passive:true});
+addEventListener('touchend',()=>{isDown=false;});
+
+// Buttons
+const btnRot=document.getElementById('btnRot');
+const btnGlow=document.getElementById('btnGlow');
+const btnOrbit=document.getElementById('btnOrbit');
+const btnTrails=document.getElementById('btnTrails');
+const btnReset=document.getElementById('btnReset');
+btnRot.onclick=()=>{autoRotate=!autoRotate;btnRot.classList.toggle('active',autoRotate);};
+btnGlow.onclick=()=>{atmos.visible=!atmos.visible;btnGlow.classList.toggle('active',atmos.visible);};
+btnOrbit.onclick=()=>{orbitGroup.visible=!orbitGroup.visible;btnOrbit.classList.toggle('active',orbitGroup.visible);};
+btnTrails.onclick=()=>{trailGroup.visible=!trailGroup.visible;btnTrails.classList.toggle('active',trailGroup.visible);};
+btnReset.onclick=()=>{theta=0.3;phi=1.2;dist=3.2;};
+
+// Resize
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+// Animate
+let t0=performance.now();
+function animate(){
+ requestAnimationFrame(animate);
+ const t=(performance.now()-t0)/1000;
+ if(autoRotate&&!isDown)theta+=0.001;
+ camera.position.x=dist*sin(phi)*sin(theta);
+ camera.position.y=dist*cos(phi);
+ camera.position.z=dist*sin(phi)*cos(theta);
+ camera.lookAt(0,0,0);
+ earth.rotation.y=t*0.01;
+ clouds.rotation.y=t*0.015;
+ updateSats(t);
+ if(trailGroup.visible)updateTrails(t);
+ renderer.render(scene,camera);
+}
+animate();
+
+// Hide loading
+setTimeout(()=>{document.getElementById('loading').classList.add('hide');},1500);
+</script>
+</body>
+</html>
